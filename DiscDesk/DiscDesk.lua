@@ -99,11 +99,32 @@ local function updateMana()
     if percent <= 25 then mana:SetStatusBarColor(.76, .18, .15) end
     manaText:SetFormattedText("%s  %d%%", title, percent)
 end
+local group, visibilityPending
+local function updateHealth(row)
+    local hp, maximum = UnitHealth(row.unit), UnitHealthMax(row.unit)
+    row.bar:SetMinMaxValues(0, maximum)
+    row.bar:SetValue(hp)
+    local shield
+    if UnitGetTotalAbsorbs then shield = UnitGetTotalAbsorbs(row.unit) end
+    if restricted(shield) or type(shield) ~= "number" then shield = nil end
+    local readable = not restricted(hp) and not restricted(maximum)
+    if DiscDeskOptions.numbers and readable then
+        row.numbers:SetFormattedText("%d+%s/%d", hp, shield and tostring(shield) or "?", maximum)
+    else
+        row.numbers:SetText("")
+    end
+    -- A separate thin strip stays visible even when health is full.
+    if shield and readable and maximum > 0 and shield > 0 then
+        row.absorb:SetWidth(math.max(1, row.bar:GetWidth() * math.min(1, shield / maximum)))
+        row.absorb:Show()
+    else
+        row.absorb:Hide()
+    end
+end
 local function refreshRows()
     for _, row in ipairs(rows) do
         if UnitExists(row.unit) then
-            row.bar:SetMinMaxValues(0, UnitHealthMax(row.unit))
-            row.bar:SetValue(UnitHealth(row.unit))
+            updateHealth(row)
             row.name:SetText(UnitName(row.unit))
             local role = UnitGroupRolesAssigned and UnitGroupRolesAssigned(row.unit)
             if not restricted(role) and (role == "TANK" or role == "HEALER" or role == "DAMAGER") then
@@ -188,12 +209,121 @@ local function addSpellButtons(parent, unit)
         button:SetScript("OnLeave", function() GameTooltip:Hide() end)
     end
 end
+local function applyVisibility()
+    if not InCombatLockdown() then group:SetShown(DiscDeskOptions.visible) end
+end
+local function bindVisibilityToggle(button)
+    button:SetFrameRef("party", group)
+    button:SetAttribute("_onclick", [[
+        if button == "LeftButton" then
+            local party = self:GetFrameRef("party")
+            if party:IsShown() then party:Hide() else party:Show() end
+        end
+    ]])
+end
+local function makePanel(parent, width, height)
+    local panel = CreateFrame("Frame", nil, parent)
+    panel:SetSize(width, height)
+    panel:SetFrameStrata("DIALOG")
+    panel:SetClampedToScreen(true)
+    panel:EnableMouse(true)
+    local bg = panel:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(.06, .07, .10, .97)
+    panel:Hide()
+    return panel
+end
+local function menuItem(panel, y, title, action)
+    local b = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    b:SetPoint("TOPLEFT", 6, y)
+    b:SetSize(panel:GetWidth()-12, 25)
+    b:SetText(title)
+    b:HookScript("OnClick", action)
+    return b
+end
+local function setupMinimap()
+    local icon = CreateFrame("Button", "DiscDeskMinimapButton", Minimap, "SecureHandlerClickTemplate")
+    icon:SetSize(32,32)
+    icon:SetFrameStrata("MEDIUM")
+    icon:SetFrameLevel(Minimap:GetFrameLevel()+8)
+    icon:SetPoint("CENTER", Minimap, "CENTER", -Minimap:GetWidth()*.36, -Minimap:GetHeight()*.36)
+    icon:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    bindVisibilityToggle(icon)
+    local art = icon:CreateTexture(nil, "ARTWORK")
+    art:SetPoint("CENTER")
+    art:SetSize(24,24)
+    art:SetTexture("Interface\\Icons\\Spell_Holy_PowerWordShield")
+    local border = icon:CreateTexture(nil, "OVERLAY")
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    border:SetSize(54,54)
+    border:SetPoint("TOPLEFT", 0, 0)
+    local menu = makePanel(UIParent, 194, 66)
+    menu:SetPoint("TOPRIGHT", icon, "BOTTOMLEFT")
+    local settings = makePanel(UIParent, 228, 102)
+    settings:SetPoint("CENTER")
+    local title = settings:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOP", 0, -8)
+    title:SetText(tr("DiscDesk settings", "Настройки DiscDesk"))
+    local values
+    local function syncNumbers()
+        values:SetText(tr("HP numbers: ", "Цифры ХП: ") ..
+            (DiscDeskOptions.numbers and tr("on", "вкл.") or tr("off", "выкл.")))
+    end
+    values = menuItem(settings, -32, "", function()
+        DiscDeskOptions.numbers = not DiscDeskOptions.numbers
+        syncNumbers()
+        refreshRows()
+    end)
+    menuItem(settings, -68, tr("Close", "Закрыть"), function() settings:Hide() end)
+    menuItem(menu, -5, tr("Settings", "Настройки"), function()
+        menu:Hide()
+        syncNumbers()
+        settings:Show()
+    end)
+    local visibility = menuItem(menu, -35, "", function()
+        menu:Hide()
+        DiscDeskOptions.visible = not DiscDeskOptions.visible
+        if InCombatLockdown() then
+            visibilityPending = true
+            print(tr("DiscDesk: visibility will change after combat.", "DiscDesk: видимость изменится после боя."))
+        else
+            applyVisibility()
+        end
+    end)
+    icon:HookScript("OnClick", function(_, button)
+        if button == "RightButton" then
+            visibility:SetText(DiscDeskOptions.visible and tr("Hide HP bars", "Скрыть полосы ХП")
+                or tr("Show HP bars", "Показать полосы ХП"))
+            menu:SetShown(not menu:IsShown())
+        else
+            menu:Hide()
+            visibilityPending = nil
+            DiscDeskOptions.visible = group:IsShown()
+        end
+    end)
+    icon:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText("DiscDesk")
+        GameTooltip:AddLine(tr("Left: toggle HP bars", "ЛКМ: показать / скрыть ХП"),1,1,1)
+        GameTooltip:AddLine(tr("Right: menu", "ПКМ: меню"),1,1,1)
+        GameTooltip:Show()
+    end)
+    icon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
 local function setup()
+    DiscDeskOptions = DiscDeskOptions or {}
+    if DiscDeskOptions.visible == nil then DiscDeskOptions.visible = true end
+    if DiscDeskOptions.numbers == nil then DiscDeskOptions.numbers = true end
     restore()
+    group = CreateFrame("Frame", nil, header, "SecureHandlerStateTemplate")
+    group:SetPoint("TOP", header, "BOTTOM", 0, -10)
+    group:SetSize(128, 42)
+    group:SetAttribute("_onstate-count", "self:SetWidth(134 * tonumber(newstate) - 6)")
+    RegisterStateDriver(group, "count", "[@party4,exists] 5; [@party3,exists] 4; [@party2,exists] 3; [@party1,exists] 2; 1")
     for i, unit in ipairs({"player", "party1", "party2", "party3", "party4"}) do
-        local b = CreateFrame("Button", "DiscDeskUnit" .. i, header, "SecureActionButtonTemplate")
-        b:SetSize(128, 28)
-        b:SetPoint("TOP", header, "BOTTOM", (i-3)*134, -10)
+        local b = CreateFrame("Button", "DiscDeskUnit" .. i, group, "SecureActionButtonTemplate")
+        b:SetSize(128, 42)
+        b:SetPoint("TOPLEFT", group, "TOPLEFT", (i-1)*134, 0)
         b:SetAttribute("unit", unit)
         b:RegisterForClicks("AnyDown", "AnyUp")
         bind(b, "", "1", spellName(2054, "Heal", "Исцеление"))
@@ -208,13 +338,21 @@ local function setup()
         role:SetPoint("LEFT", 3, 0)
         local name = label(hp)
         name:ClearAllPoints()
-        name:SetPoint("LEFT", hp, "LEFT", 22, 0)
-        name:SetPoint("RIGHT", hp, "RIGHT", -3, 0)
+        name:SetPoint("TOPLEFT", hp, "TOPLEFT", 22, -3)
+        name:SetWidth(102)
         name:SetWordWrap(false)
-        rows[i] = {unit = unit, bar = hp, name = name, role = role}
+        local numbers = hp:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        numbers:SetPoint("BOTTOM", 0, 6)
+        local absorb = hp:CreateTexture(nil, "OVERLAY")
+        absorb:SetPoint("BOTTOMLEFT")
+        absorb:SetHeight(3)
+        absorb:SetColorTexture(.35, .82, 1, 1)
+        rows[i] = {unit = unit, bar = hp, name = name, role = role, numbers = numbers, absorb = absorb}
         addSpellButtons(b, unit)
         RegisterUnitWatch(b)
     end
+    applyVisibility()
+    setupMinimap()
     refreshRows()
     refreshPartyAuras()
     updateMana()
@@ -225,9 +363,17 @@ events:SetScript("OnEvent", function(self, event, unit)
     if event == "PLAYER_LOGIN" then
         if select(2, UnitClass("player")) ~= "PRIEST" then header:Hide() return end
         setup()
+        self:RegisterEvent("PLAYER_REGEN_ENABLED")
+        if UnitGetTotalAbsorbs then self:RegisterEvent("UNIT_ABSORB_AMOUNT_CHANGED") end
         for _, name in ipairs({"GROUP_ROSTER_UPDATE","PLAYER_ROLES_ASSIGNED","PLAYER_ENTERING_WORLD","UNIT_HEALTH",
             "UNIT_AURA","UNIT_MAXHEALTH","UNIT_NAME_UPDATE","UNIT_POWER_UPDATE","UNIT_MAXPOWER"}) do
             self:RegisterEvent(name)
+        end
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        if visibilityPending then applyVisibility() visibilityPending = nil end
+    elseif event == "UNIT_ABSORB_AMOUNT_CHANGED" then
+        for _, row in ipairs(rows) do
+            if row.unit == unit and UnitExists(unit) then updateHealth(row) break end
         end
     elseif event == "UNIT_AURA" then
         if auraRows[unit] then refreshAuras(unit, auraRows[unit]) end
