@@ -241,6 +241,75 @@ local function menuItem(panel, y, title, action)
     b:HookScript("OnClick", action)
     return b
 end
+local layoutPending, anchor, handle, syncSettings
+local slots = {"player", "party1", "party2", "party3", "party4"}
+-- This snippet also runs when the party changes during combat.
+local arrange = [[
+    local count = tonumber(self:GetAttribute("state-count")) or 1
+    local visible = 0
+    local vertical = self:GetAttribute("vertical")
+    for i = 1, 5 do
+        local slot = self:GetAttribute("slot"..i)
+        if slot <= count and (slot ~= 1 or self:GetAttribute("includePlayer")) then
+            local frame = self:GetFrameRef("unit"..slot)
+            frame:ClearAllPoints()
+            if vertical then
+                frame:SetPoint("TOPLEFT", self, "TOPLEFT", 0, -visible*74)
+            else
+                frame:SetPoint("TOPLEFT", self, "TOPLEFT", visible*134, 0)
+            end
+            visible = visible + 1
+        end
+    end
+    if self:GetAttribute("includePlayer") then
+        self:GetFrameRef("unit1"):Show()
+    else
+        self:GetFrameRef("unit1"):Hide()
+    end
+    self:SetWidth((vertical or visible == 0) and 128 or visible*134-6)
+]]
+local function applyLayout()
+    if InCombatLockdown() then
+        layoutPending = true
+        return
+    end
+    layoutPending = nil
+    for i, slot in ipairs(DiscDeskOptions.order) do group:SetAttribute("slot"..i, slot) end
+    group:SetAttribute("includePlayer", DiscDeskOptions.includePlayer)
+    group:SetAttribute("vertical", DiscDeskOptions.vertical)
+    group:Execute(arrange)
+end
+local function placeAnchor()
+    anchor:ClearAllPoints()
+    anchor:SetPoint("TOP", header, "BOTTOM", DiscDeskOptions.x or 0, DiscDeskOptions.y or -10)
+end
+local function setupAnchor()
+    anchor = CreateFrame("Frame", nil, UIParent)
+    anchor:SetSize(128, 20)
+    anchor:SetMovable(true)
+    anchor:SetClampedToScreen(true)
+    placeAnchor()
+    handle = CreateFrame("Button", nil, anchor, "UIPanelButtonTemplate")
+    handle:SetSize(190,24)
+    handle:SetPoint("BOTTOM", anchor, "TOP")
+    handle:SetText(tr("Drag the HP panel", "Перетащи панель ХП"))
+    handle:RegisterForDrag("LeftButton")
+    handle:SetScript("OnDragStart", function()
+        if not InCombatLockdown() then anchor:StartMoving() end
+    end)
+    handle:SetScript("OnDragStop", function()
+        anchor:StopMovingOrSizing()
+        if not InCombatLockdown() then
+            local x = anchor:GetCenter()
+            local hx = header:GetCenter()
+            DiscDeskOptions.x = x - hx
+            DiscDeskOptions.y = anchor:GetTop() - header:GetBottom()
+            placeAnchor()
+        end
+        handle:Hide()
+    end)
+    handle:Hide()
+end
 local function setupMinimap()
     local icon = CreateFrame("Button", "DiscDeskMinimapButton", Minimap, "SecureHandlerClickTemplate")
     icon:SetSize(32,32)
@@ -259,28 +328,87 @@ local function setupMinimap()
     border:SetPoint("TOPLEFT", 0, 0)
     local menu = makePanel(UIParent, 194, 66)
     menu:SetPoint("TOPRIGHT", icon, "BOTTOMLEFT")
-    local settings = makePanel(UIParent, 228, 102)
+    local settings = makePanel(UIParent, 284, 388)
     settings:SetPoint("CENTER")
     local title = settings:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOP", 0, -8)
     title:SetText(tr("DiscDesk settings", "Настройки DiscDesk"))
-    local values
-    local function syncNumbers()
-        values:SetText(tr("HP numbers: ", "Цифры ХП: ") ..
-            (DiscDeskOptions.numbers and tr("on", "вкл.") or tr("off", "выкл.")))
+    local function toggleOption(key)
+        DiscDeskOptions[key] = not DiscDeskOptions[key]
+        applyLayout()
+        syncSettings()
     end
-    values = menuItem(settings, -32, "", function()
+    local values = menuItem(settings, -30, "", function()
         DiscDeskOptions.numbers = not DiscDeskOptions.numbers
-        syncNumbers()
         refreshRows()
+        syncSettings()
     end)
-    menuItem(settings, -68, tr("Close", "Закрыть"), function() settings:Hide() end)
-    menuItem(menu, -5, tr("Settings", "Настройки"), function()
+    local own = menuItem(settings, -57, "", function() toggleOption("includePlayer") end)
+    local orientation = menuItem(settings, -84, "", function() toggleOption("vertical") end)
+    local heading = settings:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    heading:SetPoint("TOP", 0, -117)
+    heading:SetText(tr("Party frame order", "Порядок полос"))
+    local labels = {}
+    local function swap(index, step)
+        local target = index + step
+        local order = DiscDeskOptions.order
+        if target < 1 or target > 5 then return end
+        order[index], order[target] = order[target], order[index]
+        applyLayout()
+        syncSettings()
+    end
+    for i = 1, 5 do
+        local index, y = i, -135-(i-1)*26
+        local line = settings:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        labels[i] = line
+        line:SetPoint("TOPLEFT", 12, y-4)
+        line:SetWidth(175)
+        line:SetJustifyH("LEFT")
+        line:SetWordWrap(false)
+        for _, step in ipairs({-1,1}) do
+            local delta = step
+            local arrow = CreateFrame("Button", nil, settings, "UIPanelButtonTemplate")
+            arrow:SetSize(40,24)
+            arrow:SetPoint("TOPRIGHT", delta == -1 and -49 or -6, y)
+            arrow:SetText(delta == -1 and "▲" or "▼")
+            arrow:SetEnabled(index+delta >= 1 and index+delta <= 5)
+            arrow:SetScript("OnClick", function() swap(index, delta) end)
+        end
+    end
+    local function onOff(value)
+        return value and tr("On", "вкл.") or tr("Off", "выкл.")
+    end
+    syncSettings = function()
+        values:SetText(tr("HP numbers: ", "Цифры ХП: ") .. onOff(DiscDeskOptions.numbers))
+        own:SetText(tr("Show myself: ", "Показывать себя: ") .. onOff(DiscDeskOptions.includePlayer))
+        orientation:SetText(DiscDeskOptions.vertical and tr("Layout: column", "Расположение: столбец")
+            or tr("Layout: row", "Расположение: строка"))
+        for i, slot in ipairs(DiscDeskOptions.order) do
+            local unit = slots[slot]
+            local nm = UnitName(unit)
+            local fallback = slot == 1 and tr("You", "Ты") or tr("Party slot ", "Место группы ") .. (slot-1)
+            if not restricted(nm) and nm then fallback = nm end
+            labels[i]:SetText(i .. ". " .. fallback)
+        end
+    end
+    settings:HookScript("OnShow", syncSettings)
+    menuItem(settings, -271, tr("Move HP panel", "Переместить панель ХП"), function()
+        if InCombatLockdown() then print(tr("Move after combat.", "Перемещение доступно после боя.")) return end
+        settings:Hide()
+        handle:Show()
+    end)
+    menuItem(settings, -298, tr("Reset panel position", "Сбросить положение панели"), function()
+        if InCombatLockdown() then print(tr("Move after combat.", "Перемещение доступно после боя.")) return end
+        DiscDeskOptions.x, DiscDeskOptions.y = nil, nil
+        placeAnchor()
+        handle:Hide()
+    end)
+    menuItem(settings, -350, tr("Close", "Закрыть"), function() settings:Hide() end)
+    menuItem(menu, -35, tr("Settings", "Настройки"), function()
         menu:Hide()
-        syncNumbers()
         settings:Show()
     end)
-    local visibility = menuItem(menu, -35, "", function()
+    local visibility = menuItem(menu, -5, "", function()
         menu:Hide()
         DiscDeskOptions.visible = not DiscDeskOptions.visible
         if InCombatLockdown() then
@@ -314,13 +442,14 @@ local function setup()
     DiscDeskOptions = DiscDeskOptions or {}
     if DiscDeskOptions.visible == nil then DiscDeskOptions.visible = true end
     if DiscDeskOptions.numbers == nil then DiscDeskOptions.numbers = true end
+    if DiscDeskOptions.includePlayer == nil then DiscDeskOptions.includePlayer = true end
+    DiscDeskOptions.order = DiscDeskOptions.order or {1,2,3,4,5}
     restore()
+    setupAnchor()
     group = CreateFrame("Frame", nil, header, "SecureHandlerStateTemplate")
-    group:SetPoint("TOP", header, "BOTTOM", 0, -10)
+    group:SetPoint("TOP", anchor, "TOP")
     group:SetSize(128, 42)
-    group:SetAttribute("_onstate-count", "self:SetWidth(134 * tonumber(newstate) - 6)")
-    RegisterStateDriver(group, "count", "[@party4,exists] 5; [@party3,exists] 4; [@party2,exists] 3; [@party1,exists] 2; 1")
-    for i, unit in ipairs({"player", "party1", "party2", "party3", "party4"}) do
+    for i, unit in ipairs(slots) do
         local b = CreateFrame("Button", "DiscDeskUnit" .. i, group, "SecureActionButtonTemplate")
         b:SetSize(128, 42)
         b:SetPoint("TOPLEFT", group, "TOPLEFT", (i-1)*134, 0)
@@ -349,8 +478,12 @@ local function setup()
         absorb:SetColorTexture(.35, .82, 1, 1)
         rows[i] = {unit = unit, bar = hp, name = name, role = role, numbers = numbers, absorb = absorb}
         addSpellButtons(b, unit)
-        RegisterUnitWatch(b)
+        group:SetFrameRef("unit"..i, b)
+        if i > 1 then RegisterUnitWatch(b) end
     end
+    applyLayout()
+    group:SetAttribute("_onstate-count", arrange)
+    RegisterStateDriver(group, "count", "[@party4,exists] 5; [@party3,exists] 4; [@party2,exists] 3; [@party1,exists] 2; 1")
     applyVisibility()
     setupMinimap()
     refreshRows()
@@ -370,6 +503,7 @@ events:SetScript("OnEvent", function(self, event, unit)
             self:RegisterEvent(name)
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
+        if layoutPending then applyLayout() end
         if visibilityPending then applyVisibility() visibilityPending = nil end
     elseif event == "UNIT_ABSORB_AMOUNT_CHANGED" then
         for _, row in ipairs(rows) do
@@ -382,6 +516,7 @@ events:SetScript("OnEvent", function(self, event, unit)
     elseif event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" or event == "UNIT_NAME_UPDATE" then
         if unit == "player" or (unit and unit:match("^party[1-4]$")) then refreshRows() end
     else
+        if syncSettings then syncSettings() end
         refreshRows()
         refreshPartyAuras()
         updateMana()
