@@ -1,0 +1,27 @@
+name: Release DiscDesk
+on:
+  push:
+    branches: [main]
+    paths: ['DiscDesk/**', '.github/workflows/release.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: discdesk-release
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package addon and publish new versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^## Version: //p' DiscDesk/DiscDesk.toc)
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+)+$ ]]
+          tag="v$version"
+          archive="DiscDesk-$version-forever.zip"
+          if gh release view "$tag" >/dev/null 2>&1; then exit 0; fi
+          zip -qr "$archive" DiscDesk
+          unzip -t "$archive"
+          gh release create "$tag" "$archive" --target "$GITHUB_SHA" --title "DiscDesk $version" --notes "DiscDesk $version for WoW Forever."

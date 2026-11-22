@@ -1,0 +1,6 @@
+## Interface: 16001
+## Title: DiscDesk
+## Notes: Party click healing and player mana for WoW Forever.
+## Version: 1.2
+## SavedVariablesPerCharacter: DiscDeskPosition
+DiscDesk.lua
