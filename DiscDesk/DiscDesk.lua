@@ -143,71 +143,216 @@ local function bind(button, key, click, name)
     button:SetAttribute(key .. "type" .. click, "spell")
     button:SetAttribute(key .. "spell" .. click, name)
 end
-local spells = {
-    {17, "Power Word: Shield", "Слово силы: Щит", "PowerWordShield"},
-    {139, "Renew", "Обновление", "Renew"},
-    {2050, "Lesser Heal", "Малое исцеление", "LesserHeal"},
-    {2061, "Flash Heal", "Быстрое исцеление", "FlashHeal"},
-    {2054, "Heal", "Исцеление", "Heal"},
-}
 local auraRows = {}
-local shieldDebuff = spellName(6788, "Weakened Soul", "Ослабленная душа")
-local renewBuff = spellName(139, "Renew", "Обновление")
-local function hasAura(unit, filter, wanted)
-    local index = 1
-    while true do
-        local name
+local editors = {}
+local shieldName = spellName(17, "Power Word: Shield", "Слово силы: Щит")
+local debuffName = spellName(6788, "Weakened Soul", "Ослабленная душа")
+
+local function info(id)
+    if C_Spell and C_Spell.GetSpellInfo then
+        local data = C_Spell.GetSpellInfo(id)
+        if data then return data.name, data.iconID end
+    elseif GetSpellInfo then
+        local name, _, icon = GetSpellInfo(id)
+        return name, icon
+    end
+end
+local function auraTimes(unit, filter, wanted)
+    for i = 1, 255 do
+        local name, duration, expires
         if C_UnitAuras and C_UnitAuras.GetAuraDataByIndex then
-            local aura = C_UnitAuras.GetAuraDataByIndex(unit, index, filter)
-            if restricted(aura) or not aura then return false end
-            name = aura.name
+            local a = C_UnitAuras.GetAuraDataByIndex(unit, i, filter)
+            if restricted(a) or not a then break end
+            name, duration, expires = a.name, a.duration, a.expirationTime
         elseif UnitAura then
-            name = UnitAura(unit, index, filter)
+            local icon, count, kind
+            name, icon, count, kind, duration, expires = UnitAura(unit, i, filter)
         else
-            return false
+            break
         end
         if not restricted(name) then
-            if not name then return false end
-            if name == wanted then return true end
+            if not name then break end
+            if name == wanted then
+                if not restricted(duration) and not restricted(expires)
+                    and duration and duration > 0 and expires and expires > GetTime() then
+                    return true, duration, expires
+                end
+                return true
+            end
         end
-        index = index + 1
     end
+    return false
 end
-local function refreshAuras(unit, textures)
-    local exists = UnitExists(unit)
-    local shield = exists and hasAura(unit, "HARMFUL", shieldDebuff)
-    local renew = exists and hasAura(unit, "HELPFUL", renewBuff)
-    local shieldLight = shield and .32 or 1
-    local renewLight = renew and .32 or 1
-    textures[1]:SetVertexColor(shieldLight, shieldLight, shieldLight)
-    textures[2]:SetVertexColor(renewLight, renewLight, renewLight)
+local function refreshAuras(unit, buttons)
+    for _, b in ipairs(buttons) do
+        local present, duration, expires
+        if b.auraName and UnitExists(unit) then
+            present, duration, expires = auraTimes(unit, b.filter, b.auraName)
+        end
+        local shade = present and not expires and .32 or 1
+        b.art:SetVertexColor(shade, shade, shade)
+        if expires then
+            if expires ~= b.expires or duration ~= b.duration then
+                b.swipe:SetCooldown(expires-duration, duration)
+            end
+            b.swipe:Show()
+            b.seconds:SetText(math.ceil(expires-GetTime()))
+        else
+            b.swipe:Hide()
+            b.seconds:SetText("")
+        end
+        b.expires, b.duration = expires, duration
+    end
 end
 local function refreshPartyAuras()
-    for unit, textures in pairs(auraRows) do refreshAuras(unit, textures) end
+    for unit, buttons in pairs(auraRows) do refreshAuras(unit, buttons) end
+end
+local function showSlotTip(b)
+    GameTooltip:SetOwner(b, "ANCHOR_BOTTOM")
+    if b.spellID then
+        GameTooltip:SetSpellByID(b.spellID)
+    else
+        GameTooltip:SetText(tr("Empty spell slot", "Пустая ячейка"))
+    end
+    if b.recipient then GameTooltip:AddLine(UnitName(b.recipient), 1, 1, 1) end
+    GameTooltip:Show()
+end
+local function slotArt(b)
+    local art = b:CreateTexture(nil, "ARTWORK")
+    art:SetAllPoints()
+    b.art = art
+    b:SetScript("OnEnter", showSlotTip)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+local function paintSlot(b, id)
+    local name, icon
+    if id then name, icon = info(id) end
+    b.spellID = id
+    if icon then b.art:SetTexture(icon) else b.art:SetColorTexture(.18,.18,.2,.8) end
+    if id and name == shieldName then
+        b.filter, b.auraName = "HARMFUL", debuffName
+    else
+        b.filter, b.auraName = "HELPFUL", name
+    end
 end
 local function addSpellButtons(parent, unit)
-    local textures = {}
-    auraRows[unit] = textures
-    for index, spell in ipairs(spells) do
-        local name = spellName(spell[1], spell[2], spell[3])
-        local button = CreateFrame("Button", nil, parent, "SecureActionButtonTemplate")
-        button:SetSize(24, 24)
-        button:SetPoint("TOPLEFT", parent, "BOTTOMLEFT", (index-1)*26, -3)
-        button:SetAttribute("unit", unit)
-        bind(button, "", "1", name)
-        button:RegisterForClicks("AnyDown", "AnyUp")
-        button:SetNormalTexture((C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(spell[1]))
-            or ("Interface\\Icons\\Spell_Holy_" .. spell[4]))
-        if index <= 2 then textures[index] = button:GetNormalTexture() end
-        button:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-        button:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-            GameTooltip:SetText(name)
-            GameTooltip:AddLine(UnitName(unit), 1, 1, 1)
-            GameTooltip:Show()
-        end)
-        button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local buttons = {}
+    auraRows[unit] = buttons
+    for index = 1, 5 do
+        local b = CreateFrame("Button", nil, parent, "SecureActionButtonTemplate")
+        b:SetSize(24,24)
+        b:SetPoint("TOPLEFT", parent, "BOTTOMLEFT", (index-1)*26,-3)
+        b:SetAttribute("unit", unit)
+        b:RegisterForClicks("AnyDown", "AnyUp")
+        b.recipient = unit
+        slotArt(b)
+        local swipe = CreateFrame("Cooldown", nil, b, "CooldownFrameTemplate")
+        swipe:SetAllPoints()
+        swipe:EnableMouse(false)
+        swipe:SetReverse(false)
+        swipe:SetDrawEdge(false)
+        swipe:SetHideCountdownNumbers(true)
+        swipe:Hide()
+        b.swipe = swipe
+        local overlay = CreateFrame("Frame", nil, b)
+        overlay:SetAllPoints()
+        overlay:SetFrameLevel(swipe:GetFrameLevel()+1)
+        overlay:EnableMouse(false)
+        b.seconds = label(overlay)
+        buttons[index] = b
     end
+end
+local function applySlots()
+    for i=1,5 do
+        local id = DiscDeskOptions.spells[i]
+        for _, buttons in pairs(auraRows) do
+            local b = buttons[i]
+            paintSlot(b, id)
+            b:SetAttribute("type1", id and "spell" or nil)
+            b:SetAttribute("spell1", id)
+        end
+        if editors[i] then paintSlot(editors[i],id) end
+    end
+    refreshPartyAuras()
+end
+local function editSlot(index, mouse)
+    if InCombatLockdown() then
+        print(tr("DiscDesk: edit spells after combat.", "DiscDesk: меняй заклинания вне боя."))
+        return
+    end
+    if mouse == "RightButton" then
+        DiscDeskOptions.spells[index] = nil
+    else
+        local kind, bookSlot, bank, id = GetCursorInfo()
+        if kind ~= "spell" then return end
+        if not id and C_SpellBook and C_SpellBook.GetSpellBookItemInfo then
+            local entry = C_SpellBook.GetSpellBookItemInfo(bookSlot, bank)
+            id = entry and entry.spellID
+        elseif not id and GetSpellBookItemInfo then
+            local _, resolved = GetSpellBookItemInfo(bookSlot,bank)
+            id = resolved
+        end
+        if type(id) ~= "number" or not info(id) then return end
+        DiscDeskOptions.spells[index] = id
+        ClearCursor()
+    end
+    applySlots()
+end
+local function setupSlotEditor(settings)
+    local title = settings:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
+    title:SetPoint("TOP",0,-335)
+    title:SetText(tr("Drag spells here • Right-click to clear", "Из книги мышью • ПКМ — очистить"))
+    for i=1,5 do
+        local index = i
+        local b = CreateFrame("Button",nil,settings)
+        b:SetSize(32,32)
+        b:SetPoint("TOP",settings,"TOP",(i-3)*40,-355)
+        b:RegisterForClicks("LeftButtonUp","RightButtonUp")
+        slotArt(b)
+        b:SetScript("OnReceiveDrag",function() editSlot(index) end)
+        b:SetScript("OnClick",function(_,mouse) editSlot(index,mouse) end)
+        editors[i]=b
+    end
+end
+local function outsideRange(unit, buttons)
+    if unit == "player" then return false end
+    local seen = false
+    for _, b in ipairs(buttons) do
+        if b.spellID then
+            local result
+            if C_Spell and C_Spell.IsSpellInRange then
+                result = C_Spell.IsSpellInRange(b.spellID,unit)
+            elseif IsSpellInRange then
+                result = IsSpellInRange(info(b.spellID),unit)
+            end
+            if restricted(result) or result == nil then return false end
+            if result == true or result == 1 then return false end
+            seen = true
+        end
+    end
+    return seen
+end
+local function startTracking()
+    local elapsed = 0
+    group:SetScript("OnUpdate",function(_,dt)
+        elapsed = elapsed+dt
+        if elapsed < .2 then return end
+        elapsed = 0
+        local now = GetTime()
+        for _,row in ipairs(rows) do
+            if UnitExists(row.unit) then
+                local buttons = auraRows[row.unit]
+                row.bar:SetAlpha(outsideRange(row.unit,buttons) and .25 or 1)
+                for _,b in ipairs(buttons) do
+                    if b.expires then
+                        local left = math.ceil(b.expires-now)
+                        if left > 0 then b.seconds:SetText(left)
+                        else b.seconds:SetText("") b.swipe:Hide() b.expires=nil end
+                    end
+                end
+            end
+        end
+    end)
 end
 local function applyVisibility()
     if not InCombatLockdown() then group:SetShown(DiscDeskOptions.visible) end
@@ -328,7 +473,7 @@ local function setupMinimap()
     border:SetPoint("TOPLEFT", 0, 0)
     local menu = makePanel(UIParent, 194, 66)
     menu:SetPoint("TOPRIGHT", icon, "BOTTOMLEFT")
-    local settings = makePanel(UIParent, 284, 388)
+    local settings = makePanel(UIParent, 284, 439)
     settings:SetPoint("CENTER")
     local title = settings:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOP", 0, -8)
@@ -403,7 +548,8 @@ local function setupMinimap()
         placeAnchor()
         handle:Hide()
     end)
-    menuItem(settings, -350, tr("Close", "Закрыть"), function() settings:Hide() end)
+    setupSlotEditor(settings)
+    menuItem(settings, -402, tr("Close", "Закрыть"), function() settings:Hide() end)
     menuItem(menu, -35, tr("Settings", "Настройки"), function()
         menu:Hide()
         settings:Show()
@@ -443,6 +589,7 @@ local function setup()
     if DiscDeskOptions.visible == nil then DiscDeskOptions.visible = true end
     if DiscDeskOptions.numbers == nil then DiscDeskOptions.numbers = true end
     if DiscDeskOptions.includePlayer == nil then DiscDeskOptions.includePlayer = true end
+    DiscDeskOptions.spells = DiscDeskOptions.spells or {}
     DiscDeskOptions.order = DiscDeskOptions.order or {1,2,3,4,5}
     restore()
     setupAnchor()
@@ -486,6 +633,8 @@ local function setup()
     RegisterStateDriver(group, "count", "[@party4,exists] 5; [@party3,exists] 4; [@party2,exists] 3; [@party1,exists] 2; 1")
     applyVisibility()
     setupMinimap()
+    applySlots()
+    startTracking()
     refreshRows()
     refreshPartyAuras()
     updateMana()
