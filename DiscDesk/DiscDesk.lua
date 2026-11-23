@@ -54,7 +54,7 @@ timer:SetStatusBarColor(.12, .52, .70)
 local timerText = label(timer)
 local previousMana, previousMax, deadline
 local function drawTimer()
-    if not previousMana then
+    if not previousMana and not deadline then
         timer:SetValue(0)
         timerText:SetText(tr("5 sec: unavailable", "5 с: нет данных"))
         return
@@ -67,6 +67,20 @@ local function drawTimer()
         timerText:SetText(tr("Full regen", "Полный реген"))
     end
 end
+local function onPaidCast(id)
+    if restricted(id) or type(id) ~= "number" then return end
+    local getCost = C_Spell and C_Spell.GetSpellPowerCost or GetSpellPowerCost
+    local costs = getCost and getCost(id)
+    if restricted(costs) or type(costs) ~= "table" then return end
+    for _, entry in ipairs(costs) do
+        if not restricted(entry) and not restricted(entry.type) and entry.type == 0
+            and not restricted(entry.cost) and type(entry.cost) == "number" and entry.cost > 0 then
+            deadline = GetTime() + 5
+            drawTimer()
+            return
+        end
+    end
+end
 local elapsed = 0
 timer:SetScript("OnUpdate", function(_, dt)
     if deadline then
@@ -74,7 +88,7 @@ timer:SetScript("OnUpdate", function(_, dt)
         if elapsed >= .1 then
             elapsed = 0
             drawTimer()
-            if GetTime() >= deadline then deadline = nil end
+            if GetTime() >= deadline then deadline = nil drawTimer() end
         end
     end
 end)
@@ -85,7 +99,7 @@ local function updateMana()
     local title = tr("Mana", "Мана")
     mana:SetStatusBarColor(.1, .38, .78)
     if restricted(current) or restricted(maximum) or maximum <= 0 then
-        previousMana, previousMax, deadline = nil, nil, nil
+        previousMana, previousMax = nil, nil
         drawTimer()
         manaText:SetText(title)
         return
@@ -100,30 +114,54 @@ local function updateMana()
     manaText:SetFormattedText("%s  %d%%", title, percent)
 end
 local group, visibilityPending
+local shieldName = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(17))
+    or tr("Power Word: Shield", "Слово силы: Щит")
+local function readShieldAura(row)
+    row.hasShield, row.auraAbsorb = false, nil
+    if not (C_UnitAuras and C_UnitAuras.GetAuraDataByIndex) then return end
+    for i = 1, 255 do
+        local a = C_UnitAuras.GetAuraDataByIndex(row.unit, i, "HELPFUL")
+        if restricted(a) or not a then return end
+        if not restricted(a.name) and a.name == shieldName then
+            row.hasShield = true
+            local points = a.points
+            if not restricted(points) and type(points) == "table" then
+                local value = points[1]
+                if not restricted(value) and type(value) == "number" and value > 0 then row.auraAbsorb = value end
+            end
+            return
+        end
+    end
+end
 local function updateHealth(row)
     local hp, maximum = UnitHealth(row.unit), UnitHealthMax(row.unit)
     row.bar:SetMinMaxValues(0, maximum)
     row.bar:SetValue(hp)
     local shield
     if UnitGetTotalAbsorbs then shield = UnitGetTotalAbsorbs(row.unit) end
-    if restricted(shield) or type(shield) ~= "number" then shield = nil end
-    local readable = not restricted(hp) and not restricted(maximum)
-    if DiscDeskOptions.numbers and readable then
-        row.numbers:SetFormattedText("%d+%s/%d", hp, shield and tostring(shield) or "?", maximum)
-    else
-        row.numbers:SetText("")
+    local hidden = restricted(shield)
+    if not hidden and (type(shield) ~= "number" or shield == 0) and row.hasShield then
+        shield = row.auraAbsorb
     end
-    -- A separate thin strip stays visible even when health is full.
-    if shield and readable and maximum > 0 and shield > 0 then
-        row.absorb:SetWidth(math.max(1, row.bar:GetWidth() * math.min(1, shield / maximum)))
+    local known = not hidden and type(shield) == "number"
+    if hidden or known then
+        row.absorb:SetMinMaxValues(0, maximum)
+        row.absorb:SetValue(shield)
         row.absorb:Show()
     else
         row.absorb:Hide()
     end
+    row.shieldIcon:SetShown(row.hasShield == true)
+    if DiscDeskOptions.numbers and not restricted(hp) and not restricted(maximum) then
+        row.numbers:SetFormattedText("%d+%s/%d", hp, known and tostring(shield) or "?", maximum)
+    else
+        row.numbers:SetText("")
+    end
 end
-local function refreshRows()
+local function refreshRows(scanShields)
     for _, row in ipairs(rows) do
         if UnitExists(row.unit) then
+            if scanShields then readShieldAura(row) end
             updateHealth(row)
             row.name:SetText(UnitName(row.unit))
             local role = UnitGroupRolesAssigned and UnitGroupRolesAssigned(row.unit)
@@ -145,7 +183,6 @@ local function bind(button, key, click, name)
 end
 local auraRows = {}
 local editors = {}
-local shieldName = spellName(17, "Power Word: Shield", "Слово силы: Щит")
 local debuffName = spellName(6788, "Weakened Soul", "Ослабленная душа")
 
 local function info(id)
@@ -269,7 +306,12 @@ local function applySlots()
             local b = buttons[i]
             paintSlot(b, id)
             b:SetAttribute("type1", id and "spell" or nil)
-            b:SetAttribute("spell1", id)
+            local name = id and info(id)
+            local rank
+            if id and C_Spell and C_Spell.GetSpellSubtext then rank = C_Spell.GetSpellSubtext(id)
+            elseif id and GetSpellInfo then rank = select(2,GetSpellInfo(id)) end
+            if name and rank and rank ~= "" then name = name .. "(" .. rank .. ")" end
+            b:SetAttribute("spell1", name or id)
         end
         if editors[i] then paintSlot(editors[i],id) end
     end
@@ -428,6 +470,7 @@ local function placeAnchor()
     anchor:ClearAllPoints()
     anchor:SetPoint("TOP", header, "BOTTOM", DiscDeskOptions.x or 0, DiscDeskOptions.y or -10)
 end
+local editing = false
 local function setupAnchor()
     anchor = CreateFrame("Frame", nil, UIParent)
     anchor:SetSize(128, 20)
@@ -451,9 +494,42 @@ local function setupAnchor()
             DiscDeskOptions.y = anchor:GetTop() - header:GetBottom()
             placeAnchor()
         end
-        handle:Hide()
+        if not editing then handle:Hide() end
     end)
     handle:Hide()
+    local manaHandle = CreateFrame("Button",nil,header,"UIPanelButtonTemplate")
+    manaHandle:SetSize(174,22)
+    manaHandle:SetPoint("BOTTOM",timer,"TOP",0,2)
+    manaHandle:SetText(tr("DiscDesk: mana / 5 sec", "DiscDesk: мана / 5 сек"))
+    manaHandle:RegisterForDrag("LeftButton")
+    manaHandle:SetScript("OnDragStart",header:GetScript("OnDragStart"))
+    manaHandle:SetScript("OnDragStop",header:GetScript("OnDragStop"))
+    manaHandle:Hide()
+    local function editMode(active)
+        editing = active and not InCombatLockdown()
+        handle:SetFrameStrata("DIALOG")
+        manaHandle:SetFrameStrata("DIALOG")
+        handle:SetShown(editing)
+        manaHandle:SetShown(editing)
+    end
+    if EventRegistry then
+        EventRegistry:RegisterCallback("EditMode.Enter",function() editMode(true) end,anchor)
+        EventRegistry:RegisterCallback("EditMode.Exit",function() editMode(false) end,anchor)
+    end
+    local watcher = CreateFrame("Frame")
+    local hooked
+    local function hookEditor()
+        if not hooked and EditModeManagerFrame then
+            hooked = true
+            EditModeManagerFrame:HookScript("OnShow",function() editMode(true) end)
+            EditModeManagerFrame:HookScript("OnHide",function() editMode(false) end)
+            if EditModeManagerFrame:IsShown() then editMode(true) end
+            watcher:UnregisterEvent("ADDON_LOADED")
+        end
+    end
+    watcher:RegisterEvent("ADDON_LOADED")
+    watcher:SetScript("OnEvent",hookEditor)
+    hookEditor()
 end
 local function setupMinimap()
     local icon = CreateFrame("Button", "DiscDeskMinimapButton", Minimap, "SecureHandlerClickTemplate")
@@ -619,11 +695,17 @@ local function setup()
         name:SetWordWrap(false)
         local numbers = hp:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         numbers:SetPoint("BOTTOM", 0, 6)
-        local absorb = hp:CreateTexture(nil, "OVERLAY")
+        local shieldIcon = hp:CreateTexture(nil, "OVERLAY")
+        shieldIcon:SetSize(12,12)
+        shieldIcon:SetPoint("TOPRIGHT",-1,-1)
+        shieldIcon:SetTexture("Interface\\Icons\\Spell_Holy_PowerWordShield")
+        local absorb = CreateFrame("StatusBar",nil,hp)
+        absorb:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
+        absorb:SetPoint("BOTTOMRIGHT")
         absorb:SetPoint("BOTTOMLEFT")
         absorb:SetHeight(3)
-        absorb:SetColorTexture(.35, .82, 1, 1)
-        rows[i] = {unit = unit, bar = hp, name = name, role = role, numbers = numbers, absorb = absorb}
+        absorb:SetStatusBarColor(.35, .82, 1, 1)
+        rows[i] = {unit = unit, bar = hp, name = name, role = role, numbers = numbers, absorb = absorb, shieldIcon = shieldIcon}
         addSpellButtons(b, unit)
         group:SetFrameRef("unit"..i, b)
         if i > 1 then RegisterUnitWatch(b) end
@@ -635,38 +717,46 @@ local function setup()
     setupMinimap()
     applySlots()
     startTracking()
-    refreshRows()
+    refreshRows(true)
     refreshPartyAuras()
     updateMana()
 end
 local events = CreateFrame("Frame")
 events:RegisterEvent("PLAYER_LOGIN")
-events:SetScript("OnEvent", function(self, event, unit)
+events:SetScript("OnEvent", function(self, event, unit, castGUID, spellID)
     if event == "PLAYER_LOGIN" then
         if select(2, UnitClass("player")) ~= "PRIEST" then header:Hide() return end
         setup()
+        self:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
         self:RegisterEvent("PLAYER_REGEN_ENABLED")
         if UnitGetTotalAbsorbs then self:RegisterEvent("UNIT_ABSORB_AMOUNT_CHANGED") end
         for _, name in ipairs({"GROUP_ROSTER_UPDATE","PLAYER_ROLES_ASSIGNED","PLAYER_ENTERING_WORLD","UNIT_HEALTH",
             "UNIT_AURA","UNIT_MAXHEALTH","UNIT_NAME_UPDATE","UNIT_POWER_UPDATE","UNIT_MAXPOWER"}) do
             self:RegisterEvent(name)
         end
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        onPaidCast(spellID)
     elseif event == "PLAYER_REGEN_ENABLED" then
         if layoutPending then applyLayout() end
         if visibilityPending then applyVisibility() visibilityPending = nil end
     elseif event == "UNIT_ABSORB_AMOUNT_CHANGED" then
         for _, row in ipairs(rows) do
-            if row.unit == unit and UnitExists(unit) then updateHealth(row) break end
+            if row.unit == unit and UnitExists(unit) then readShieldAura(row) updateHealth(row) break end
         end
     elseif event == "UNIT_AURA" then
-        if auraRows[unit] then refreshAuras(unit, auraRows[unit]) end
+        if auraRows[unit] then
+            for _, row in ipairs(rows) do
+                if row.unit == unit then readShieldAura(row) updateHealth(row) break end
+            end
+            refreshAuras(unit, auraRows[unit])
+        end
     elseif event == "UNIT_POWER_UPDATE" or event == "UNIT_MAXPOWER" then
         if unit == "player" then updateMana() end
     elseif event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" or event == "UNIT_NAME_UPDATE" then
         if unit == "player" or (unit and unit:match("^party[1-4]$")) then refreshRows() end
     else
         if syncSettings then syncSettings() end
-        refreshRows()
+        refreshRows(true)
         refreshPartyAuras()
         updateMana()
     end
