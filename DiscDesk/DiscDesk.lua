@@ -152,8 +152,12 @@ local function updateHealth(row)
         row.absorb:Hide()
     end
     row.shieldIcon:SetShown(row.hasShield == true)
-    if DiscDeskOptions.numbers and not restricted(hp) and not restricted(maximum) then
-        row.numbers:SetFormattedText("%d+%s/%d", hp, known and tostring(shield) or "?", maximum)
+    if DiscDeskOptions.numbers then
+        if hidden or known then
+            row.numbers:SetFormattedText("%d+%d/%d", hp, shield, maximum)
+        else
+            row.numbers:SetFormattedText("%d+?/%d", hp, maximum)
+        end
     else
         row.numbers:SetText("")
     end
